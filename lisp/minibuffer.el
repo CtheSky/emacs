@@ -1877,13 +1877,24 @@ variables.")
                   (if sort-fun
                       (funcall sort-fun completions)
                     (sort completions 'string-lessp))))
-          (when afun
-            (setq completions
-                  (mapcar (lambda (s)
-                            (let ((ann (funcall afun s)))
-                              (if ann (list s ann) s)))
-                          completions)))
-
+          ;; Sort again in case the completion style has propertized
+          ;; completions with a 'completion-style-sort-order.
+          (setq completions
+                (sort completions
+                      (lambda (a b)
+                        (let ((va (get-text-property 0 'completion-style-sort-order a))
+                              (vb (get-text-property 0 'completion-style-sort-order b)))
+                          (if (and va vb) (< va vb) va)))))
+          ;; Annotate completions with the annotation function and/or
+          ;; the completion style annotation.
+          (setq completions
+                (mapcar (lambda (s)
+                          (let ((style-ann (get-text-property 0 'completion-style-annotation s))
+                                (ann (and afun (funcall afun s))))
+                            (when style-ann
+                              (setq ann (concat ann "" style-ann)))
+                            (if ann (list s ann) s)))
+                        completions))
           (with-current-buffer standard-output
             (set (make-local-variable 'completion-base-position)
                  (list (+ start base-size)
@@ -3056,21 +3067,40 @@ PATTERN is as returned by `completion-pcm--string->pattern'."
          (let* ((pos (if point-idx (match-beginning point-idx) (match-end 0)))
                 (md (match-data))
                 (start (pop md))
-                (end (pop md)))
+                (end (pop md))
+                (len (length str))
+                (score-numerator 0)
+                (score-denominator 0)
+                (aux 0)
+                (update-score
+                 (lambda (a b)
+                   "Update score variables given match range (A B)."
+                   (setq
+                    score-numerator   (+ score-numerator (- b a))
+                    score-denominator (+ score-denominator (expt (- a aux) 1.5))
+                    aux              b))))
+           (funcall update-score 0 start)
            (while md
-             (put-text-property start (pop md)
+             (funcall update-score start (car md))
+             (put-text-property start
+                                (pop md)
                                 'font-lock-face 'completions-common-part
                                 str)
              (setq start (pop md)))
            (put-text-property start end
                               'font-lock-face 'completions-common-part
                               str)
+           (funcall update-score start end)
            (if (> (length str) pos)
                (put-text-property pos (1+ pos)
-				  'font-lock-face 'completions-first-difference
-				  str)))
-	 str)
+                                  'font-lock-face 'completions-first-difference
+                                  str))
+           (put-text-property
+            0 1 'completion-pcm-commonality-score
+            (/ score-numerator (* len (1+ score-denominator)) 1.0) str))
+         str)
        completions))))
+
 
 (defun completion-pcm--find-all-completions (string table pred point
                                                     &optional filter)
@@ -3441,8 +3471,14 @@ which is at the core of flex logic.  The extra
                 string table pred point
                 #'completion-flex--make-flex-pattern)))
     (when all
-      (nconc (completion-pcm--hilit-commonality pattern all)
-             (length prefix)))))
+      (let ((hilighted (completion-pcm--hilit-commonality pattern all)))
+        (mapc
+         (lambda (comp)
+           (let ((score (get-text-property 0 'completion-pcm-commonality-score comp)))
+             (put-text-property 0 1 'completion-style-sort-order (- score) comp)
+             (put-text-property 0 1 'completion-style-annotation (format " %s" score) comp)))
+         hilighted)
+        (nconc hilighted (length prefix))))))
 
 ;; Initials completion
 ;; Complete /ums to /usr/monnier/src or lch to list-command-history.
